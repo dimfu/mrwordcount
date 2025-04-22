@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"net/http"
 	"net/rpc"
@@ -15,12 +16,15 @@ import (
 )
 
 const PORT = ":8080"
+const REDUCER_AMT = 5
+
+type TaskType int
 
 type Args struct {
 	ID      string
 	Host    string
 	Port    int
-	Task    string
+	Task    TaskType
 	Payload []byte
 }
 
@@ -30,12 +34,18 @@ type Reply struct {
 
 type TimeServer int64
 type Master struct {
-	clients map[string]string
+	clients map[string]TaskType
 }
+
+const (
+	TASK_MAP TaskType = iota
+	TASK_REDUCE
+	TASK_UNDEFINED
+)
 
 func NewMaster() *Master {
 	return &Master{
-		clients: make(map[string]string),
+		clients: make(map[string]TaskType),
 	}
 }
 
@@ -178,41 +188,65 @@ func main() {
 			return
 		}
 
-		mappers := []string{}
-		for k, v := range master.clients {
-			if v == "map" {
-				mappers = append(mappers, k)
-			}
-		}
-
-		if len(mappers) == 0 {
+		clientsLen := len(master.clients)
+		if clientsLen == 0 {
 			http.Error(w, "No clients to call", http.StatusServiceUnavailable)
 			return
 		}
 
-		// TODO: diffrentiate which client is which (mapper or reducer)
-		content, err := readPg(f, len(mappers))
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-		}
-
+		// distribute task
+		reducersLen := int(math.Min(REDUCER_AMT, math.Max(1, float64(clientsLen-1))))
+		mappersLen := clientsLen - reducersLen
+		connectedClients := make(map[*rpc.Client]TaskType)
 		var i int
-		for c := range content {
-			host := mappers[i]
-			client, err := rpc.Dial("tcp", host)
+		for clientAddr := range master.clients {
+			client, err := rpc.Dial("tcp", clientAddr)
 			if err != nil {
 				log.Println("error on dialing.", err)
 				continue
 			}
-			defer client.Close()
-			var reply map[string]int
-			err = client.Call("Worker.Map", Args{Payload: c}, &reply)
+			var t TaskType
+			if i < mappersLen {
+				connectedClients[client] = TASK_MAP
+				t = TASK_MAP
+			} else {
+				connectedClients[client] = TASK_REDUCE
+				t = TASK_REDUCE
+			}
+			var reply string
+			err = client.Call("Worker.AssignTask", &Args{Task: t}, &reply)
 			if err != nil {
-				log.Println("error on calling.", err)
+				log.Println("error while assigning task", err)
 				continue
 			}
 			fmt.Println(reply)
 			i++
+		}
+
+		mapClients := []*rpc.Client{}
+		for client, task := range connectedClients {
+			if task == TASK_MAP {
+				mapClients = append(mapClients, client)
+			}
+		}
+
+		content, err := readPg(f, mappersLen)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+
+		var j int
+		for c := range content {
+			client := mapClients[j]
+			defer client.Close()
+			var reply string
+			err := client.Call("Worker.Map", &Args{Payload: c}, &reply)
+			if err != nil {
+				log.Println("error on map", err)
+				continue
+			}
+			fmt.Println(reply)
+			j++
 		}
 	})
 

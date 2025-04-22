@@ -13,29 +13,43 @@ import (
 	"time"
 )
 
+type TaskType int
+type TaskState string
+
 type Args struct {
 	Host    string
 	Port    int
-	Task    string
+	Task    TaskType
 	Payload []byte
 }
 type Reply struct {
 	Message string
 }
+
 type Worker struct {
-	Task string
+	Addr  string
+	State TaskState
+	Task  TaskType
 }
 
 const MASTER_PORT = 8080
 
 const (
-	TASK_MAP    = "map"
-	TASK_REDUCE = "reduce"
+	TASK_MAP TaskType = iota
+	TASK_REDUCE
+	TASK_UNDEFINED
 )
 
-func initWorker(task string) *Worker {
+const (
+	TASK_PROCESSING = "TASK_PROCESSING"
+	TASK_FINISH     = "TASK_FINISH"
+	TASK_IDLE       = "TASK_IDLE"
+)
+
+func initWorker(task TaskType) *Worker {
 	return &Worker{
-		Task: task,
+		Task:  task,
+		State: TASK_IDLE,
 	}
 }
 
@@ -44,31 +58,39 @@ func (w *Worker) Health(args *Args, reply *string) error {
 	return nil
 }
 
-func (w *Worker) Map(args *Args, reply *map[string]int) error {
+func (w *Worker) AssignTask(args *Args, reply *string) error {
+	w.Task = args.Task
+	var t string
+	switch args.Task {
+	case TASK_MAP:
+		t = "Map"
+	case TASK_REDUCE:
+		t = "Reduce"
+	}
+	*reply = fmt.Sprintf("[%v] Assigned task %v", w.Addr, t)
+	return nil
+}
+
+func (w *Worker) Map(args *Args, reply *string) error {
 	m := make(map[string]int)
 	str := string(args.Payload)
 	words := strings.Fields(str)
+	w.State = TASK_PROCESSING
+	*reply = fmt.Sprintf("[%v] Processing text...", w.Addr)
 	for _, word := range words {
 		m[word]++
 	}
-	*reply = m
+	w.State = TASK_FINISH
 	return nil
 }
 
 var (
 	port int
-	task string
 )
 
 func main() {
 	flag.IntVar(&port, "p", 9000, "Provide port number")
-	flag.StringVar(&task, "t", TASK_MAP, "Worker task (map/reduce)")
 	flag.Parse()
-
-	if task != "map" && task != "reduce" {
-		fmt.Println("task should be 'map' or 'reduce'")
-		return
-	}
 
 	args := Args{}
 
@@ -103,13 +125,14 @@ func main() {
 		}
 	}
 
-	err := client.Call("Master.Register", &Args{Host: "localhost", Port: port, Task: task}, new(string))
+	worker := initWorker(TASK_UNDEFINED)
+	rpc.Register(worker)
+
+	err := client.Call("Master.Register", &Args{Host: "localhost", Port: port, Task: worker.Task}, new(string))
 	if err != nil {
 		log.Fatalf("failed registering connection to master: %v", err)
 	}
-
-	worker := initWorker(task)
-	rpc.Register(worker)
+	worker.Addr = fmt.Sprintf("%s:%d", "localhost", port)
 
 	l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
