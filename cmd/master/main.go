@@ -27,7 +27,7 @@ func (t *TimeServer) GiveServerTime(args *shared.Args, reply *int64) error {
 
 func main() {
 	master := NewMaster()
-	timeServer := new(shared.TimeServer)
+	timeServer := new(TimeServer)
 
 	mux := master.Routes()
 

@@ -5,12 +5,17 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
 
 func GetFilePath(t string) (string, error) {
-	file, err := os.Open("static")
+	dir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	file, err := os.Open(path.Join(dir, "static"))
 	if err != nil {
 		return "", fmt.Errorf("failed to open static dir: %w", err)
 	}
