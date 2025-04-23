@@ -11,88 +11,62 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/dimfu/mrwordcount/shared"
 )
-
-type TaskType int
-type TaskState string
-
-type Args struct {
-	Host    string
-	Port    int
-	Task    TaskType
-	Payload []byte
-}
-type Reply struct {
-	Message string
-}
 
 type Worker struct {
 	Addr  string
-	State TaskState
-	Task  TaskType
+	State string
+	Task  shared.TaskType
 }
 
 const MASTER_PORT = 8080
 
-const (
-	TASK_MAP TaskType = iota
-	TASK_REDUCE
-	TASK_UNDEFINED
-)
-
-const (
-	TASK_PROCESSING = "TASK_PROCESSING"
-	TASK_FINISH     = "TASK_FINISH"
-	TASK_IDLE       = "TASK_IDLE"
-)
-
-func initWorker(task TaskType) *Worker {
+func initWorker(task shared.TaskType) *Worker {
 	return &Worker{
 		Task:  task,
-		State: TASK_IDLE,
+		State: shared.IDLE,
 	}
 }
 
-func (w *Worker) Health(args *Args, reply *string) error {
+func (w *Worker) Health(args *shared.Args, reply *string) error {
 	*reply = "OK"
 	return nil
 }
 
-func (w *Worker) AssignTask(args *Args, reply *string) error {
+func (w *Worker) AssignTask(args *shared.Args, reply *string) error {
 	w.Task = args.Task
 	var t string
 	switch args.Task {
-	case TASK_MAP:
+	case shared.TASK_MAP:
 		t = "Map"
-	case TASK_REDUCE:
+	case shared.TASK_REDUCE:
 		t = "Reduce"
 	}
 	*reply = fmt.Sprintf("[%v] Assigned task %v", w.Addr, t)
 	return nil
 }
 
-func (w *Worker) Map(args *Args, reply *string) error {
+func (w *Worker) Map(args *shared.Args, reply *string) error {
 	m := make(map[string]int)
 	str := string(args.Payload)
 	words := strings.Fields(str)
-	w.State = TASK_PROCESSING
+	w.State = shared.PROCESSING
 	*reply = fmt.Sprintf("[%v] Processing text...", w.Addr)
 	for _, word := range words {
 		m[word]++
 	}
-	w.State = TASK_FINISH
+	w.State = shared.FINISH
 	return nil
 }
 
-var (
-	port int
-)
-
 func main() {
+	var port int
 	flag.IntVar(&port, "p", 9000, "Provide port number")
 	flag.Parse()
 
-	args := Args{}
+	args := shared.Args{}
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
@@ -125,10 +99,10 @@ func main() {
 		}
 	}
 
-	worker := initWorker(TASK_UNDEFINED)
+	worker := initWorker(shared.TASK_UNDEFINED)
 	rpc.Register(worker)
 
-	err := client.Call("Master.Register", &Args{Host: "localhost", Port: port, Task: worker.Task}, new(string))
+	err := client.Call("Master.Register", &shared.Args{Host: "localhost", Port: port, Task: worker.Task}, new(string))
 	if err != nil {
 		log.Fatalf("failed registering connection to master: %v", err)
 	}
@@ -144,7 +118,7 @@ func main() {
 	case <-stop:
 		var reply string
 		log.Println("received shutdown")
-		err := client.Call("Master.Unregister", Args{Host: "localhost", Port: port}, &reply)
+		err := client.Call("Master.Unregister", shared.Args{Host: "localhost", Port: port}, &reply)
 		if err != nil {
 			log.Fatalf("failed registering connection to master: %v", err)
 		} else {
