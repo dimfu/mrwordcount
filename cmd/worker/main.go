@@ -10,7 +10,6 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/dimfu/mrwordcount/shared"
 )
@@ -66,53 +65,58 @@ func main() {
 	flag.IntVar(&port, "p", 9000, "Provide port number")
 	flag.Parse()
 
-	args := shared.Args{}
-
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
-
-	var client *rpc.Client
-	connected := false
-	for !connected {
-		select {
-		case <-stop:
-			log.Println("received shutdown on connection retry")
-			return
-		case <-time.After(2 * time.Second):
-			addr := fmt.Sprintf("localhost:%d", MASTER_PORT)
-			c, err := rpc.DialHTTP("tcp", addr)
-			if err != nil {
-				log.Println("err dialing:", err)
-				time.Sleep(2 * time.Second)
-				continue
-			}
-			client = c
-			var reply int64
-			err = client.Call("TimeServer.GiveServerTime", args, &reply)
-			if err != nil {
-				log.Println("arith error:", err)
-				time.Sleep(2 * time.Second)
-				continue
-			}
-			fmt.Println("connected to server:", reply)
-			connected = true
-		}
-	}
 
 	worker := initWorker(shared.TASK_UNDEFINED)
 	rpc.Register(worker)
 
-	err := client.Call("Master.Register", &shared.Args{Host: "localhost", Port: port, Task: worker.Task}, new(string))
+	var l net.Listener
+	for {
+		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+		if err != nil {
+			if opErr, ok := err.(*net.OpError); ok {
+				if syscallErr, ok := opErr.Err.(*os.SyscallError); ok {
+					if syscallErr.Err == syscall.EADDRINUSE {
+						fmt.Printf("Port %d in use, trying next...\n", port)
+						port++
+						continue
+					}
+				}
+			}
+			panic(err)
+		}
+		l = listener
+		break
+	}
+
+	addr := fmt.Sprintf("localhost:%d", MASTER_PORT)
+	client, err := rpc.DialHTTP("tcp", addr)
+	if err != nil {
+		log.Fatalf("err dialing: %v", err)
+	}
+	var reply string
+	err = client.Call("Master.Register", &shared.Args{Host: "localhost", Port: port, Task: worker.Task}, &reply)
 	if err != nil {
 		log.Fatalf("failed registering connection to master: %v", err)
 	}
+	log.Println(reply)
+
 	worker.Addr = fmt.Sprintf("%s:%d", "localhost", port)
 
-	l, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
-	if err != nil {
-		panic(err)
-	}
-	go rpc.Accept(l)
+	go func() {
+		for {
+			conn, err := l.Accept()
+			if err != nil {
+				if opErr, ok := err.(*net.OpError); ok && opErr.Err.Error() == "use of closed network connection" {
+					return
+				}
+				log.Printf("Accept error: %v\n", err)
+				continue
+			}
+			go rpc.ServeConn(conn)
+		}
+	}()
 
 	select {
 	case <-stop:
