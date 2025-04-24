@@ -1,13 +1,18 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"net"
 	"net/http"
 	"net/rpc"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -113,6 +118,11 @@ func (m *Master) runReducer(fileName string) []string {
 				log.Println("Reduce failed:", err)
 				return
 			}
+			for _, file := range t.fileNames {
+				if err := os.Remove(file); err != nil {
+					log.Println(err)
+				}
+			}
 			atomic.AddInt32(&success, 1)
 			fileNames = append(fileNames, p)
 			mu.Unlock()
@@ -174,4 +184,40 @@ func (m *Master) clearAssignments() {
 		client.Close()
 		delete(m.reduceAssignments, client)
 	}
+}
+
+func (m *Master) archive(files []string) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := zip.NewWriter(&buf)
+	for _, file := range files {
+		f, err := os.Open(file)
+		if err != nil {
+			return nil, err
+		}
+		defer f.Close()
+		info, err := f.Stat()
+		if err != nil {
+			return nil, err
+		}
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return nil, err
+		}
+		header.Name = filepath.Base(file)
+		w, err := writer.CreateHeader(header)
+		if err != nil {
+			return nil, err
+		}
+		_, err = io.Copy(w, f)
+		if err != nil {
+			return nil, err
+		}
+		if err := os.Remove(f.Name()); err != nil {
+			return nil, err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }

@@ -5,6 +5,8 @@ import (
 	"log"
 	"net/http"
 	"net/rpc"
+	"os"
+	"path"
 	"strings"
 
 	"github.com/dimfu/mrwordcount/shared"
@@ -95,6 +97,21 @@ func (m *Master) count(w http.ResponseWriter, r *http.Request) {
 	}
 
 	results := m.runReducer(filename)
-	fmt.Println(results)
+	buf, err := m.archive(results)
+	if err != nil {
+		http.Error(w, "Failed to create zip", http.StatusInternalServerError)
+		return
+	}
+
+	if err := os.Remove(path.Join(os.TempDir(), filename)); err != nil {
+		log.Println("Error while deleting temp dir")
+	}
+
 	m.clearAssignments()
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", `attachment; filename="archive.zip"`)
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(buf)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf)
 }
