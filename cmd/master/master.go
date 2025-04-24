@@ -72,7 +72,6 @@ func (m *Master) runMapper(content <-chan []byte, filename string) []string {
 			mu.Lock()
 			idx := atomic.AddInt32(&j, 1) - 1
 			client := clients[idx]
-			defer client.Close()
 			var taskPayload shared.TaskDone
 			err := client.Call("Worker.Map", &shared.Args{Payload: payload, Filename: filename}, &taskPayload)
 			if err != nil || len(taskPayload.FileNames) == 0 {
@@ -105,7 +104,6 @@ func (m *Master) runReducer(fileName string) []string {
 		go func(t *TaskInfo) {
 			defer wg.Done()
 			mu.Lock()
-			defer client.Close()
 			var p string
 			err := client.Call("Worker.Reduce", &shared.Args{FileNames: t.fileNames, Filename: fileName}, &p)
 			if err != nil || len(p) == 0 {
@@ -155,6 +153,7 @@ func (m *Master) distributeTask() error {
 		var reply string
 		err = client.Call("Worker.AssignTask", &shared.Args{Task: t, NReducer: nReducer}, &reply)
 		if err != nil {
+			client.Close()
 			log.Println("error while assigning task", err)
 			continue
 		}
@@ -162,4 +161,15 @@ func (m *Master) distributeTask() error {
 		i++
 	}
 	return nil
+}
+
+func (m *Master) ClearAssignments() {
+	for client := range m.mapAssignments {
+		client.Close()
+		delete(m.mapAssignments, client)
+	}
+	for client := range m.reduceAssignments {
+		client.Close()
+		delete(m.reduceAssignments, client)
+	}
 }

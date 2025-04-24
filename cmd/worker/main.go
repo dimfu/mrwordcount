@@ -48,6 +48,11 @@ func (w *Worker) Health(args *shared.Args, reply *string) error {
 	return nil
 }
 
+func (w *Worker) ResetState() {
+	w.Task = shared.TASK_UNDEFINED
+	w.State = shared.IDLE
+}
+
 func (w *Worker) AssignTask(args *shared.Args, reply *string) error {
 	w.Task = args.Task
 	w.NReducer = args.NReducer
@@ -101,6 +106,9 @@ func (w *Worker) Map(args *shared.Args, reply *shared.TaskDone) error {
 	*reply = shared.TaskDone{
 		FileNames: intermediateFileNames,
 	}
+
+	w.ResetState()
+
 	return nil
 }
 
@@ -147,6 +155,7 @@ func (w *Worker) Reduce(args *shared.Args, reply *string) error {
 	}
 
 	*reply = tmpFile.Name()
+	w.ResetState()
 	return nil
 }
 

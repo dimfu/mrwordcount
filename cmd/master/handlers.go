@@ -59,6 +59,7 @@ func (m *Master) count(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m.wg.Add(1)
+	defer m.wg.Done()
 	filename := baseName(f)
 	intermediateFileNames := m.runMapper(content, filename)
 	if len(intermediateFileNames) == 0 {
@@ -95,5 +96,5 @@ func (m *Master) count(w http.ResponseWriter, r *http.Request) {
 
 	results := m.runReducer(filename)
 	fmt.Println(results)
-	m.wg.Done()
+	m.ClearAssignments()
 }
