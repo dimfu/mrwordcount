@@ -10,7 +10,16 @@ import (
 	"strings"
 )
 
-func GetFilePath(t string) (string, error) {
+func baseName(p string) string {
+	base := filepath.Base(p)
+	ext := filepath.Ext(base)
+	if len(ext) > 0 {
+		return strings.TrimSuffix(base, ext)
+	}
+	return base
+}
+
+func getFilePath(t string) (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
 		return "", err
@@ -28,13 +37,14 @@ func GetFilePath(t string) (string, error) {
 		ext := filepath.Ext(file.Name())
 		name := strings.TrimSuffix(file.Name(), ext)
 		if name == t {
+			// TODO: do something that isn't hardcoded to only static folder
 			return filepath.Join("static", file.Name()), nil
 		}
 	}
 	return "", fmt.Errorf("file %s not found", t)
 }
 
-func ReadChunks(p string, wsize int) (<-chan []byte, error) {
+func readChunks(p string, wsize int) (<-chan []byte, error) {
 	file, err := os.Open(p)
 	if err != nil {
 		return nil, err

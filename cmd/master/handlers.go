@@ -3,17 +3,14 @@ package main
 import (
 	"fmt"
 	"log"
-	"math"
 	"net/http"
 	"net/rpc"
 	"strings"
-	"sync"
-	"sync/atomic"
 
 	"github.com/dimfu/mrwordcount/shared"
 )
 
-func (m *Master) Health(w http.ResponseWriter, r *http.Request) {
+func (m *Master) health(w http.ResponseWriter, _ *http.Request) {
 	var msg []string
 	for host := range m.clients {
 		client, err := rpc.Dial("tcp", host)
@@ -34,89 +31,69 @@ func (m *Master) Health(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, strings.Join(msg, "\n"))
 }
 
-func (m *Master) Count(w http.ResponseWriter, r *http.Request) {
+func (m *Master) count(w http.ResponseWriter, r *http.Request) {
 	pg := r.PathValue("pg")
-	f, err := GetFilePath(pg)
+	f, err := getFilePath(pg)
 	if err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			http.Error(w, err.Error(), http.StatusNotFound)
 		} else {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			log.Println(err)
 		}
 		return
 	}
 
-	clientsLen := len(m.clients)
-	if clientsLen == 0 {
-		http.Error(w, "No clients to call", http.StatusServiceUnavailable)
-		return
-	}
-
-	// distribute task
-	reducersLen := 1
-	if clientsLen > REDUCER_AMT {
-		reducersLen = int(math.Min(REDUCER_AMT, math.Max(1, float64(clientsLen-1))))
-	}
-	mappersLen := clientsLen - reducersLen
-	connectedClients := make(map[*rpc.Client]shared.TaskType)
-	var i int
-	for clientAddr := range m.clients {
-		client, err := rpc.Dial("tcp", clientAddr)
-		if err != nil {
-			log.Println("error on dialing.", err)
-			continue
-		}
-		var t shared.TaskType
-		if i < mappersLen {
-			connectedClients[client] = shared.TASK_MAP
-			t = shared.TASK_MAP
-		} else {
-			connectedClients[client] = shared.TASK_REDUCE
-			t = shared.TASK_REDUCE
-		}
-		var reply string
-		err = client.Call("Worker.AssignTask", &shared.Args{Task: t}, &reply)
-		if err != nil {
-			log.Println("error while assigning task", err)
-			continue
-		}
-		fmt.Println(reply)
-		i++
-	}
-
-	mapClients := []*rpc.Client{}
-	reducerClients := []*rpc.Client{}
-	for client, task := range connectedClients {
-		if task == shared.TASK_MAP {
-			mapClients = append(mapClients, client)
-		} else {
-			reducerClients = append(reducerClients, client)
-		}
-	}
-
-	content, err := ReadChunks(f, mappersLen)
+	err = m.distributeTask()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Println(err)
+		return
 	}
 
-	var j int32
-	var wg sync.WaitGroup
-	for c := range content {
-		wg.Add(1)
-		go func(payload []byte) {
-			defer wg.Done()
-			idx := atomic.AddInt32(&j, 1) - 1
-			client := mapClients[idx]
-			defer client.Close()
-			var reply string
-			err := client.Call("Worker.Map", &shared.Args{Payload: payload}, &reply)
-			if err != nil {
-				log.Println("error on map", err)
-				return
-			}
-			fmt.Println(reply)
-		}(c)
+	content, err := readChunks(f, len(m.mapAssignments))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		log.Println(err)
+		return
 	}
-	wg.Wait()
-	fmt.Println("Done processing text from all mapper")
+
+	m.wg.Add(1)
+	filename := baseName(f)
+	intermediateFileNames := m.runMapper(content, filename)
+	if len(intermediateFileNames) == 0 {
+		err = fmt.Errorf("Cannot proceed to reduce phase, none of the mappers succeded")
+		log.Println(err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	log.Println("Done processing text from all mapper, entering reducer phase now")
+
+	taskPer := len(intermediateFileNames) / len(m.reduceAssignments)
+	extra := len(intermediateFileNames) % len(m.reduceAssignments)
+
+	pop := func(n int, arr *[]string) []string {
+		i := 0
+		if i+n > len(*arr) {
+			n = len(*arr) - i
+		}
+		popped := (*arr)[i : i+n]
+		*arr = append((*arr)[:i], (*arr)[i+n:]...)
+		return popped
+	}
+
+	rcount := 0
+	for _, info := range m.reduceAssignments {
+		t := taskPer
+		if rcount < extra {
+			t += 1
+		}
+		assigned := pop(taskPer+1, &intermediateFileNames)
+		info.fileNames = append(info.fileNames, assigned...)
+		rcount++
+	}
+
+	results := m.runReducer(filename)
+	fmt.Println(results)
+	m.wg.Done()
 }

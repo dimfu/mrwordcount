@@ -1,18 +1,44 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"log"
+	"math"
+	"net"
+	"net/http"
+	"net/rpc"
+	"sync"
+	"sync/atomic"
 
 	"github.com/dimfu/mrwordcount/shared"
 )
 
+type Master struct {
+	clients           map[string]shared.TaskType
+	mapAssignments    map[*rpc.Client]*TaskInfo
+	reduceAssignments map[*rpc.Client]*TaskInfo
+	wg                sync.WaitGroup
+}
+
 func NewMaster() *Master {
 	return &Master{
-		clients: make(map[string]shared.TaskType),
+		clients:           make(map[string]shared.TaskType),
+		mapAssignments:    make(map[*rpc.Client]*TaskInfo),
+		reduceAssignments: make(map[*rpc.Client]*TaskInfo),
 	}
 }
 
+func (m *Master) RunServer() error {
+	l, err := net.Listen("tcp", PORT)
+	if err != nil {
+		return fmt.Errorf("error while listening to port %s: %v", PORT, err)
+	}
+
+	return http.Serve(l, m.Routes())
+}
+
+// rpc
 func (m *Master) Register(args *shared.Args, reply *string) error {
 	h := fmt.Sprintf("%v:%d", args.Host, args.Port)
 	log.Printf("new connection received: %s", h)
@@ -26,5 +52,114 @@ func (m *Master) Unregister(args *shared.Args, reply *string) error {
 	log.Printf("connection removed: %s", h)
 	delete(m.clients, h)
 	*reply = "Disconnected from master"
+	return nil
+}
+
+func (m *Master) runMapper(content <-chan []byte, filename string) []string {
+	fileNames := []string{}
+	clients := []*rpc.Client{}
+	for c := range m.mapAssignments {
+		clients = append(clients, c)
+	}
+	var j int32
+	var success, fail int32
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for c := range content {
+		wg.Add(1)
+		go func(payload []byte) {
+			defer wg.Done()
+			mu.Lock()
+			idx := atomic.AddInt32(&j, 1) - 1
+			client := clients[idx]
+			defer client.Close()
+			var taskPayload shared.TaskDone
+			err := client.Call("Worker.Map", &shared.Args{Payload: payload, Filename: filename}, &taskPayload)
+			if err != nil || len(taskPayload.FileNames) == 0 {
+				atomic.AddInt32(&fail, 1)
+				log.Println("Map failed:", err)
+				return
+			}
+			atomic.AddInt32(&success, 1)
+			fileNames = append(fileNames, taskPayload.FileNames...)
+			mu.Unlock()
+		}(c)
+	}
+	wg.Wait()
+	log.Printf("Success: %d, Failed: %d", success, fail)
+	return fileNames
+}
+
+func (m *Master) runReducer(fileName string) []string {
+	fileNames := []string{}
+	clients := []*rpc.Client{}
+	for c := range m.reduceAssignments {
+		clients = append(clients, c)
+	}
+	var success, fail int32
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	for client, task := range m.reduceAssignments {
+		wg.Add(1)
+		go func(t *TaskInfo) {
+			defer wg.Done()
+			mu.Lock()
+			defer client.Close()
+			var p string
+			err := client.Call("Worker.Reduce", &shared.Args{FileNames: t.fileNames, Filename: fileName}, &p)
+			if err != nil || len(p) == 0 {
+				atomic.AddInt32(&fail, 1)
+				log.Println("Reduce failed:", err)
+				return
+			}
+			atomic.AddInt32(&success, 1)
+			fileNames = append(fileNames, p)
+			mu.Unlock()
+		}(task)
+	}
+	wg.Wait()
+	log.Printf("Success: %d, Failed: %d", success, fail)
+	return fileNames
+}
+
+func (m *Master) distributeTask() error {
+	nClient := len(m.clients)
+	if nClient == 0 {
+		return errors.New("No clients to call")
+	}
+	nReducer := 1
+	if nClient > REDUCER_AMT {
+		nReducer = int(math.Min(REDUCER_AMT, math.Max(1, float64(nClient-1))))
+	}
+	nMapper := nClient - nReducer
+	var i int
+	for clientAddr := range m.clients {
+		client, err := rpc.Dial("tcp", clientAddr)
+		if err != nil {
+			log.Println("error on dialing.", err)
+			continue
+		}
+		var t shared.TaskType
+		if i < nMapper {
+			m.mapAssignments[client] = &TaskInfo{
+				status: shared.IN_PROGRESS,
+			}
+			t = shared.TASK_MAP
+		} else {
+			m.reduceAssignments[client] = &TaskInfo{
+				status: shared.IN_PROGRESS,
+			}
+			t = shared.TASK_REDUCE
+		}
+		var reply string
+		err = client.Call("Worker.AssignTask", &shared.Args{Task: t, NReducer: nReducer}, &reply)
+		if err != nil {
+			log.Println("error while assigning task", err)
+			continue
+		}
+		log.Println(reply)
+		i++
+	}
 	return nil
 }

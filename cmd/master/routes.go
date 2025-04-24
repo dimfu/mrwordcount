@@ -1,15 +1,22 @@
 package main
 
-import "net/http"
+import (
+	"net/http"
+	"net/rpc"
+)
 
 func (m *Master) Routes() http.Handler {
 	mux := http.NewServeMux()
 	http.DefaultServeMux = mux
 
+	rpc.RegisterName("TimeServer", new(TimeServer))
+	rpc.RegisterName("Master", m)
+	rpc.HandleHTTP()
+
 	healthHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			m.Health(w, r)
+			m.health(w, r)
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -18,7 +25,7 @@ func (m *Master) Routes() http.Handler {
 	countHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			m.Count(w, r)
+			m.count(w, r)
 		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}

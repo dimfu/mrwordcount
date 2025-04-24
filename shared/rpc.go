@@ -1,20 +1,32 @@
 package shared
 
 type TaskType int
+type TaskStatus string
 
 type Args struct {
-	ID      string
-	Host    string
-	Port    int
-	Task    TaskType
-	Payload []byte
+	NReducer  int
+	Host      string
+	Port      int
+	Task      TaskType
+	Filename  string   // original text file name
+	FileNames []string // to store collections of temp files
+	Payload   []byte
 }
 
 type Reply struct {
 	Message string
 }
 
+type TaskDone struct {
+	FileNames []string
+}
+
 type TimeServer int64
+
+type KV struct {
+	Key   string
+	Value int
+}
 
 const (
 	TASK_MAP TaskType = iota
@@ -23,7 +35,7 @@ const (
 )
 
 const (
-	PROCESSING = "PROCESSING"
-	FINISH     = "FINISH"
-	IDLE       = "IDLE"
+	IN_PROGRESS TaskStatus = "IN_PROGRESS"
+	FINISH                 = "FINISH"
+	IDLE                   = "IDLE"
 )

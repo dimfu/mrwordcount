@@ -1,9 +1,6 @@
 package main
 
 import (
-	"net"
-	"net/http"
-	"net/rpc"
 	"time"
 
 	"github.com/dimfu/mrwordcount/shared"
@@ -14,8 +11,10 @@ const (
 	REDUCER_AMT = 5
 )
 
-type Master struct {
-	clients map[string]shared.TaskType
+type TaskInfo struct {
+	identifier string
+	status     shared.TaskStatus
+	fileNames  []string
 }
 
 type TimeServer int64
@@ -26,19 +25,8 @@ func (t *TimeServer) GiveServerTime(args *shared.Args, reply *int64) error {
 }
 
 func main() {
-	master := NewMaster()
-	timeServer := new(TimeServer)
-
-	mux := master.Routes()
-
-	rpc.RegisterName("TimeServer", timeServer)
-	rpc.RegisterName("Master", master)
-	rpc.HandleHTTP()
-
-	l, err := net.Listen("tcp", PORT)
-	if err != nil {
+	m := NewMaster()
+	if err := m.RunServer(); err != nil {
 		panic(err)
 	}
-
-	http.Serve(l, mux)
 }
