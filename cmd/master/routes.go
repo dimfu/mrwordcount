@@ -5,7 +5,7 @@ import (
 	"net/rpc"
 )
 
-func (m *Master) Routes() http.Handler {
+func (m *Master) routes() http.Handler {
 	mux := http.NewServeMux()
 	http.DefaultServeMux = mux
 

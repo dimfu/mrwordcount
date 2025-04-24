@@ -96,5 +96,5 @@ func (m *Master) count(w http.ResponseWriter, r *http.Request) {
 
 	results := m.runReducer(filename)
 	fmt.Println(results)
-	m.ClearAssignments()
+	m.clearAssignments()
 }

@@ -43,12 +43,7 @@ func initWorker(task shared.TaskType) *Worker {
 	}
 }
 
-func (w *Worker) Health(args *shared.Args, reply *string) error {
-	*reply = "OK"
-	return nil
-}
-
-func (w *Worker) ResetState() {
+func (w *Worker) resetState() {
 	w.Task = shared.TASK_UNDEFINED
 	w.State = shared.IDLE
 }
@@ -64,6 +59,12 @@ func (w *Worker) AssignTask(args *shared.Args, reply *string) error {
 		t = "Reduce"
 	}
 	*reply = fmt.Sprintf("[%v] Assigned task %v", w.Addr, t)
+	return nil
+}
+
+// rpc
+func (w *Worker) Health(args *shared.Args, reply *string) error {
+	*reply = "OK"
 	return nil
 }
 
@@ -107,8 +108,7 @@ func (w *Worker) Map(args *shared.Args, reply *shared.TaskDone) error {
 		FileNames: intermediateFileNames,
 	}
 
-	w.ResetState()
-
+	w.resetState()
 	return nil
 }
 
@@ -155,9 +155,11 @@ func (w *Worker) Reduce(args *shared.Args, reply *string) error {
 	}
 
 	*reply = tmpFile.Name()
-	w.ResetState()
+	w.resetState()
 	return nil
 }
+
+// end rpc
 
 func main() {
 	var port int

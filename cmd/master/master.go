@@ -16,26 +16,26 @@ import (
 
 type Master struct {
 	clients           map[string]shared.TaskType
-	mapAssignments    map[*rpc.Client]*TaskInfo
-	reduceAssignments map[*rpc.Client]*TaskInfo
+	mapAssignments    map[*rpc.Client]*taskInfo
+	reduceAssignments map[*rpc.Client]*taskInfo
 	wg                sync.WaitGroup
 }
 
-func NewMaster() *Master {
+func newMaster() *Master {
 	return &Master{
 		clients:           make(map[string]shared.TaskType),
-		mapAssignments:    make(map[*rpc.Client]*TaskInfo),
-		reduceAssignments: make(map[*rpc.Client]*TaskInfo),
+		mapAssignments:    make(map[*rpc.Client]*taskInfo),
+		reduceAssignments: make(map[*rpc.Client]*taskInfo),
 	}
 }
 
-func (m *Master) RunServer() error {
+func (m *Master) runServer() error {
 	l, err := net.Listen("tcp", PORT)
 	if err != nil {
 		return fmt.Errorf("error while listening to port %s: %v", PORT, err)
 	}
 
-	return http.Serve(l, m.Routes())
+	return http.Serve(l, m.routes())
 }
 
 // rpc
@@ -54,6 +54,8 @@ func (m *Master) Unregister(args *shared.Args, reply *string) error {
 	*reply = "Disconnected from master"
 	return nil
 }
+
+// end rpc
 
 func (m *Master) runMapper(content <-chan []byte, filename string) []string {
 	fileNames := []string{}
@@ -85,7 +87,7 @@ func (m *Master) runMapper(content <-chan []byte, filename string) []string {
 		}(c)
 	}
 	wg.Wait()
-	log.Printf("Success: %d, Failed: %d", success, fail)
+	log.Printf("[Mapper] Success: %d, Failed: %d", success, fail)
 	return fileNames
 }
 
@@ -101,7 +103,7 @@ func (m *Master) runReducer(fileName string) []string {
 
 	for client, task := range m.reduceAssignments {
 		wg.Add(1)
-		go func(t *TaskInfo) {
+		go func(t *taskInfo) {
 			defer wg.Done()
 			mu.Lock()
 			var p string
@@ -117,7 +119,7 @@ func (m *Master) runReducer(fileName string) []string {
 		}(task)
 	}
 	wg.Wait()
-	log.Printf("Success: %d, Failed: %d", success, fail)
+	log.Printf("[Reducer] Success: %d, Failed: %d", success, fail)
 	return fileNames
 }
 
@@ -140,12 +142,12 @@ func (m *Master) distributeTask() error {
 		}
 		var t shared.TaskType
 		if i < nMapper {
-			m.mapAssignments[client] = &TaskInfo{
+			m.mapAssignments[client] = &taskInfo{
 				status: shared.IN_PROGRESS,
 			}
 			t = shared.TASK_MAP
 		} else {
-			m.reduceAssignments[client] = &TaskInfo{
+			m.reduceAssignments[client] = &taskInfo{
 				status: shared.IN_PROGRESS,
 			}
 			t = shared.TASK_REDUCE
@@ -163,7 +165,7 @@ func (m *Master) distributeTask() error {
 	return nil
 }
 
-func (m *Master) ClearAssignments() {
+func (m *Master) clearAssignments() {
 	for client := range m.mapAssignments {
 		client.Close()
 		delete(m.mapAssignments, client)
