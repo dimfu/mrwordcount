@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,9 +15,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"syscall"
+	"time"
 	"unicode"
 
 	"github.com/dimfu/mrwordcount/shared"
@@ -58,7 +60,9 @@ func (w *Worker) AssignTask(args *shared.Args, reply *string) error {
 	case shared.TASK_REDUCE:
 		t = "Reduce"
 	}
-	*reply = fmt.Sprintf("[%v] Assigned task %v", w.Addr, t)
+	rep := fmt.Sprintf("[%v] Assigned task %v", w.Addr, t)
+	log.Println(rep)
+	*reply = rep
 	return nil
 }
 
@@ -69,16 +73,25 @@ func (w *Worker) Health(args *shared.Args, reply *string) error {
 }
 
 func (w *Worker) Map(args *shared.Args, reply *shared.TaskDone) error {
-	payload := string(args.Payload)
-	ff := func(r rune) bool { return !unicode.IsLetter(r) }
-	words := strings.FieldsFunc(payload, ff)
-	intermediateKV := []shared.KV{}
-	for _, word := range words {
-		kv := shared.KV{Key: word, Value: 1}
-		intermediateKV = append(intermediateKV, kv)
+	start := time.Now()
+	splitFunc := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
+		start := 0
+		for start < len(data) {
+			if unicode.IsLetter(rune(data[start])) {
+				break
+			}
+			start++
+		}
+		for i := start; i < len(data); i++ {
+			if !unicode.IsLetter(rune(data[i])) {
+				return i + 1, data[start:i], nil
+			}
+		}
+		if atEOF && start < len(data) {
+			return len(data), data[start:], nil
+		}
+		return start, nil, nil
 	}
-	encoders := make(map[int]*json.Encoder)
-	intermediateFileNames := []string{}
 
 	baseTmp := os.TempDir()
 	mapTmpDir := filepath.Join(baseTmp, args.Filename)
@@ -87,33 +100,58 @@ func (w *Worker) Map(args *shared.Args, reply *shared.TaskDone) error {
 		return err
 	}
 
+	intermediateFileNames := []string{}
+	encoders := make(map[int]*json.Encoder)
+	files := make([]*os.File, w.NReducer)
+
 	for i := 0; i < w.NReducer; i++ {
 		f, err := os.CreateTemp(mapTmpDir, "map")
 		if err != nil {
 			return err
 		}
-		defer f.Close()
+		files[i] = f
 		intermediateFileNames = append(intermediateFileNames, f.Name())
 		enc := json.NewEncoder(f)
 		encoders[i] = enc
 	}
 
-	for _, kv := range intermediateKV {
+	reader := bytes.NewReader(args.Payload)
+	scanner := bufio.NewScanner(reader)
+	scanner.Split(splitFunc)
+
+	for scanner.Scan() {
+		word := scanner.Text()
+		kv := shared.KV{Key: word, Value: 1}
 		err := encoders[ihash(kv.Key)%w.NReducer].Encode(&kv)
 		if err != nil {
-			return fmt.Errorf("couldn't encode %v\n", &kv)
+			return fmt.Errorf("couldn't encode %v: %v", &kv, err)
 		}
 	}
+
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("scanner error: %v", err)
+	}
+
+	for _, f := range files {
+		f.Close()
+	}
+
 	*reply = shared.TaskDone{
 		FileNames: intermediateFileNames,
 	}
 
+	elapsed := time.Since(start)
+	log.Println("Map took", elapsed)
+
 	w.resetState()
+
 	return nil
 }
 
 func (w *Worker) Reduce(args *shared.Args, reply *string) error {
-	intermediate := []shared.KV{}
+	start := time.Now()
+	log.Println("Reduce in process")
+	counts := make(map[string]int)
 	for _, name := range args.FileNames {
 		f, err := os.Open(name)
 		if err != nil {
@@ -126,15 +164,8 @@ func (w *Worker) Reduce(args *shared.Args, reply *string) error {
 			if err := decoder.Decode(&kv); err != nil {
 				break
 			}
-			intermediate = append(intermediate, kv)
+			counts[strings.ToLower(kv.Key)] += kv.Value
 		}
-	}
-
-	sort.Sort(shared.ByKey(intermediate))
-
-	counts := make(map[string]int)
-	for _, kv := range intermediate {
-		counts[strings.ToLower(kv.Key)] += kv.Value
 	}
 
 	baseTmp := os.TempDir()
@@ -156,6 +187,8 @@ func (w *Worker) Reduce(args *shared.Args, reply *string) error {
 
 	*reply = tmpFile.Name()
 	w.resetState()
+	elapsed := time.Since(start)
+	log.Println("Reduce took", elapsed)
 	return nil
 }
 

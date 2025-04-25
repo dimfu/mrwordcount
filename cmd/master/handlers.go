@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/dimfu/mrwordcount/shared"
 )
@@ -34,6 +35,7 @@ func (m *Master) health(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (m *Master) count(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
 	pg := r.PathValue("pg")
 	f, err := getFilePath(pg)
 	if err != nil {
@@ -107,6 +109,8 @@ func (m *Master) count(w http.ResponseWriter, r *http.Request) {
 		log.Println("Error while deleting temp dir")
 	}
 
+	elapsed := time.Since(start)
+	log.Printf("Processes took %s to finish", elapsed)
 	m.clearAssignments()
 
 	w.Header().Set("Content-Type", "application/zip")

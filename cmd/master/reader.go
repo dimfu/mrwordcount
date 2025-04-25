@@ -90,9 +90,9 @@ func readChunks(p string, wsize int) (<-chan []byte, error) {
 			copy(chunk, b[:split])
 			out <- chunk
 		}
+		if len(leftOver) > 0 {
+			out <- leftOver
+		}
 	}()
-	if len(leftOver) > 0 {
-		out <- leftOver
-	}
 	return out, nil
 }

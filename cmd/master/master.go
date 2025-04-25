@@ -64,11 +64,6 @@ func (m *Master) Unregister(args *shared.Args, reply *string) error {
 
 func (m *Master) runMapper(content <-chan []byte, filename string) []string {
 	fileNames := []string{}
-	clients := []*rpc.Client{}
-	for c := range m.mapAssignments {
-		clients = append(clients, c)
-	}
-	var j int32
 	var success, fail int32
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -76,9 +71,19 @@ func (m *Master) runMapper(content <-chan []byte, filename string) []string {
 		wg.Add(1)
 		go func(payload []byte) {
 			defer wg.Done()
+			var client *rpc.Client
 			mu.Lock()
-			idx := atomic.AddInt32(&j, 1) - 1
-			client := clients[idx]
+			for mapper, t := range m.mapAssignments {
+				if t.status == shared.IDLE {
+					t.status = shared.IN_PROGRESS
+					client = mapper
+					break
+				}
+			}
+			mu.Unlock()
+			if client == nil {
+				return
+			}
 			var taskPayload shared.TaskDone
 			err := client.Call("Worker.Map", &shared.Args{Payload: payload, Filename: filename}, &taskPayload)
 			if err != nil || len(taskPayload.FileNames) == 0 {
@@ -87,6 +92,7 @@ func (m *Master) runMapper(content <-chan []byte, filename string) []string {
 				return
 			}
 			atomic.AddInt32(&success, 1)
+			mu.Lock()
 			fileNames = append(fileNames, taskPayload.FileNames...)
 			mu.Unlock()
 		}(c)
@@ -153,12 +159,12 @@ func (m *Master) distributeTask() error {
 		var t shared.TaskType
 		if i < nMapper {
 			m.mapAssignments[client] = &taskInfo{
-				status: shared.IN_PROGRESS,
+				status: shared.IDLE,
 			}
 			t = shared.TASK_MAP
 		} else {
 			m.reduceAssignments[client] = &taskInfo{
-				status: shared.IN_PROGRESS,
+				status: shared.IDLE,
 			}
 			t = shared.TASK_REDUCE
 		}
