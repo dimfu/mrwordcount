@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"hash/fnv"
@@ -24,10 +25,11 @@ import (
 )
 
 type Worker struct {
-	Addr     string
-	NReducer int
-	State    shared.TaskStatus
-	Task     shared.TaskType
+	Addr         string
+	NReducer     int
+	State        shared.TaskStatus
+	Task         shared.TaskType
+	IntentFailed bool
 }
 
 const MASTER_PORT = 8080
@@ -38,10 +40,11 @@ func ihash(key string) int {
 	return int(h.Sum32() & 0x7fffffff)
 }
 
-func initWorker(task shared.TaskType) *Worker {
+func initWorker(task shared.TaskType, intentFailed bool) *Worker {
 	return &Worker{
-		Task:  task,
-		State: shared.IDLE,
+		Task:         task,
+		State:        shared.IDLE,
+		IntentFailed: intentFailed,
 	}
 }
 
@@ -66,13 +69,27 @@ func (w *Worker) AssignTask(args *shared.Args, reply *string) error {
 	return nil
 }
 
+func (w *Worker) ClearTask(args *shared.Args, reply *string) error {
+	w.resetState()
+	return nil
+}
+
 // rpc
+func (w *Worker) AckWorker(args *shared.Args, reply *shared.AckWorker) error {
+	*reply = shared.AckWorker{Ack: true, TaskType: w.Task}
+	return nil
+}
+
 func (w *Worker) Health(args *shared.Args, reply *string) error {
 	*reply = "OK"
 	return nil
 }
 
 func (w *Worker) Map(args *shared.Args, reply *shared.TaskDone) error {
+	defer w.resetState()
+	if w.IntentFailed {
+		return errors.New("Job failed intentionally")
+	}
 	start := time.Now()
 	splitFunc := func(data []byte, atEOF bool) (advance int, token []byte, err error) {
 		start := 0
@@ -143,28 +160,36 @@ func (w *Worker) Map(args *shared.Args, reply *shared.TaskDone) error {
 	elapsed := time.Since(start)
 	log.Println("Map took", elapsed)
 
-	w.resetState()
-
 	return nil
 }
 
 func (w *Worker) Reduce(args *shared.Args, reply *string) error {
+	defer w.resetState()
+	if w.IntentFailed {
+		return errors.New("Job failed intentionally")
+	}
 	start := time.Now()
 	log.Println("Reduce in process")
 	counts := make(map[string]int)
 	for _, name := range args.FileNames {
-		f, err := os.Open(name)
+		err := func() error {
+			f, err := os.Open(name)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			decoder := json.NewDecoder(f)
+			for {
+				var kv shared.KV
+				if err := decoder.Decode(&kv); err != nil {
+					break
+				}
+				counts[strings.ToLower(kv.Key)] += kv.Value
+			}
+			return nil
+		}()
 		if err != nil {
 			return err
-		}
-		defer f.Close()
-		decoder := json.NewDecoder(f)
-		for {
-			var kv shared.KV
-			if err := decoder.Decode(&kv); err != nil {
-				break
-			}
-			counts[strings.ToLower(kv.Key)] += kv.Value
 		}
 	}
 
@@ -186,7 +211,6 @@ func (w *Worker) Reduce(args *shared.Args, reply *string) error {
 	}
 
 	*reply = tmpFile.Name()
-	w.resetState()
 	elapsed := time.Since(start)
 	log.Println("Reduce took", elapsed)
 	return nil
@@ -196,13 +220,15 @@ func (w *Worker) Reduce(args *shared.Args, reply *string) error {
 
 func main() {
 	var port int
+	var intentFailed bool
 	flag.IntVar(&port, "p", 9000, "Provide port number")
+	flag.BoolVar(&intentFailed, "if", false, "Intentionally fail the worker's job")
 	flag.Parse()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 
-	worker := initWorker(shared.TASK_UNDEFINED)
+	worker := initWorker(shared.TASK_UNDEFINED, intentFailed)
 	rpc.Register(worker)
 
 	var l net.Listener

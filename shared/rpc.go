@@ -13,6 +13,11 @@ type Args struct {
 	Payload   []byte
 }
 
+type AckWorker struct {
+	Ack      bool
+	TaskType TaskType
+}
+
 type Reply struct {
 	Message string
 }

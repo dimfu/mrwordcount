@@ -55,6 +55,7 @@ func (m *Master) count(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO: should not re read file if the file has not changed since last read (use cache)
 	content, err := readChunks(f, len(m.mapAssignments))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -105,13 +106,14 @@ func (m *Master) count(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// TODO: maybe if the text file is not updated, dont remove temp file for cache
 	if err := os.Remove(path.Join(os.TempDir(), filename)); err != nil {
 		log.Println("Error while deleting temp dir")
 	}
 
 	elapsed := time.Since(start)
 	log.Printf("Processes took %s to finish", elapsed)
-	m.clearAssignments()
+	m.clearAllAssignments()
 
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Content-Disposition", `attachment; filename="archive.zip"`)

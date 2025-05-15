@@ -6,3 +6,6 @@ run-master:
 
 run-worker:
 	./bin/worker
+
+run-failed-worker:
+	./bin/worker -if

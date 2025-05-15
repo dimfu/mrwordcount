@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/dimfu/mrwordcount/shared"
 )
@@ -39,6 +40,17 @@ func (m *Master) runServer() error {
 	if err != nil {
 		return fmt.Errorf("error while listening to port %s: %v", PORT, err)
 	}
+
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				m.ackWorkers()
+			}
+		}
+	}()
 
 	return http.Serve(l, m.routes())
 }
@@ -67,6 +79,9 @@ func (m *Master) runMapper(content <-chan []byte, filename string) []string {
 	var success, fail int32
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+
+	var retryQueue [][]byte
+
 	for c := range content {
 		wg.Add(1)
 		go func(payload []byte) {
@@ -89,16 +104,33 @@ func (m *Master) runMapper(content <-chan []byte, filename string) []string {
 			if err != nil || len(taskPayload.FileNames) == 0 {
 				atomic.AddInt32(&fail, 1)
 				log.Println("Map failed:", err)
+				mu.Lock()
+				retryQueue = append(retryQueue, payload)
+				delete(m.mapAssignments, client)
+				mu.Unlock()
 				return
 			}
 			atomic.AddInt32(&success, 1)
 			mu.Lock()
+			m.mapAssignments[client].status = shared.IDLE
 			fileNames = append(fileNames, taskPayload.FileNames...)
 			mu.Unlock()
 		}(c)
 	}
 	wg.Wait()
 	log.Printf("[Mapper] Success: %d, Failed: %d", success, fail)
+
+	if len(retryQueue) > 0 {
+		log.Printf("[Mapper] Retrying %d failed tasks...", len(retryQueue))
+		retryChan := make(chan []byte, len(retryQueue))
+		for _, item := range retryQueue {
+			retryChan <- item
+		}
+		close(retryChan)
+		retriedResults := m.runMapper(retryChan, filename)
+		fileNames = append(fileNames, retriedResults...)
+	}
+
 	return fileNames
 }
 
@@ -159,12 +191,14 @@ func (m *Master) distributeTask() error {
 		var t shared.TaskType
 		if i < nMapper {
 			m.mapAssignments[client] = &taskInfo{
-				status: shared.IDLE,
+				status:     shared.IDLE,
+				identifier: clientAddr,
 			}
 			t = shared.TASK_MAP
 		} else {
 			m.reduceAssignments[client] = &taskInfo{
-				status: shared.IDLE,
+				status:     shared.IDLE,
+				identifier: clientAddr,
 			}
 			t = shared.TASK_REDUCE
 		}
@@ -181,7 +215,25 @@ func (m *Master) distributeTask() error {
 	return nil
 }
 
-func (m *Master) clearAssignments() {
+func (m *Master) ackWorkers() {
+	var clients []*rpc.Client
+	for client := range m.mapAssignments {
+		clients = append(clients, client)
+	}
+	for client := range m.reduceAssignments {
+		clients = append(clients, client)
+	}
+	for _, client := range clients {
+		var ack = shared.AckWorker{}
+		err := client.Call("Worker.AckWorker", &shared.Args{}, &ack)
+		if err != nil || !ack.Ack {
+			log.Println("failed on acknowledging client:", err)
+			continue
+		}
+	}
+}
+
+func (m *Master) clearAllAssignments() {
 	for client := range m.mapAssignments {
 		client.Close()
 		delete(m.mapAssignments, client)
@@ -194,6 +246,9 @@ func (m *Master) clearAssignments() {
 
 func (m *Master) archive(files []string) ([]byte, error) {
 	var buf bytes.Buffer
+	if len(files) == 0 {
+		return buf.Bytes(), errors.New("No file to archive")
+	}
 	writer := zip.NewWriter(&buf)
 	for _, file := range files {
 		f, err := os.Open(file)
